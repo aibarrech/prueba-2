@@ -1,24 +1,26 @@
 import {
-  Calendar,
+  AlertCircle,
+  BookOpen,
+  CalendarDays,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  ExternalLink,
   Printer,
   RefreshCw,
-  Search,
   X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MiniCalendar } from './components/MiniCalendar';
-import { OccupancyGrid, OccupancyGridSkeleton } from './components/OccupancyGrid';
-import { RoomDetailModal } from './components/RoomDetailModal';
-import { SubjectSearch } from './components/SubjectSearch';
-import type { SubjectOption } from './components/SubjectSearch';
-import { ROOM_GROUPS, TIME_SLOTS } from './data/roomGroups';
+import { CalendarSidebar } from './components/CalendarSidebar';
+import { TimetableGrid } from './components/TimetableGrid';
+import {
+  ALL_UNIQUE_ROOM_NAMES,
+  ROOM_GROUPS,
+  SCHOOL_INFO,
+  TIME_SLOTS,
+} from './data/roomGroups';
 import type {
   DayTimetableResponse,
   GridDaySchedule,
-  RoomDaySchedule,
   RoomGroupId,
 } from './data/roomGroups';
 import {
@@ -28,540 +30,424 @@ import {
   getCurrentMadridMinutes,
   getTodayMadridISO,
   getWeekStrip,
+  normalizeSearchText,
 } from './utils/dateUtils';
 
-type ActiveSection = 'all' | RoomGroupId;
-type RoomFilterMode = 'all' | 'active' | 'free-at-slot';
+type ActiveGridFilter = 'ALL' | RoomGroupId;
 
-interface SelectedRoomState {
-  room: RoomDaySchedule;
-  gridTitle: string;
-  slotIndex?: number;
+const AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
+function getInitialDateFromUrl(fallbackIso: string): string {
+  try {
+    const param = new URLSearchParams(window.location.search).get('date');
+    if (param && /^\d{4}-\d{2}-\d{2}$/.test(param)) {
+      return param;
+    }
+  } catch {
+    // ignore URL errors
+  }
+  return fallbackIso;
 }
 
-const AUTO_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
-
 export default function App() {
-  const [todayISO, setTodayISO] = useState<string>(() => getTodayMadridISO());
-  const [selectedDate, setSelectedDate] = useState<string>(() => getTodayMadridISO());
-  const [activeSection, setActiveSection] = useState<ActiveSection>('all');
+  const [todayIso, setTodayIso] = useState<string>(() => getTodayMadridISO());
+  const [selectedDate, setSelectedDate] = useState<string>(() =>
+    getInitialDateFromUrl(getTodayMadridISO())
+  );
+  const [activeGrid, setActiveGrid] = useState<ActiveGridFilter>('ALL');
+  const [roomQuery, setRoomQuery] = useState<string>('');
+  const [subjectQuery, setSubjectQuery] = useState<string>('');
+  const [freeAtSlot, setFreeAtSlot] = useState<number | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
+  const [mobileCalendarOpen, setMobileCalendarOpen] = useState<boolean>(false);
 
   const [timetable, setTimetable] = useState<DayTimetableResponse | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [refreshing, setRefreshing] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const [roomSearchQuery, setRoomSearchQuery] = useState<string>('');
-  const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
-  const [onlySubjectRooms, setOnlySubjectRooms] = useState<boolean>(false);
-  const [filterMode, setFilterMode] = useState<RoomFilterMode>('all');
-  const [freeSlotIndex, setFreeSlotIndex] = useState<number>(4); // 10:00 default
-
-  const [printTarget, setPrintTarget] = useState<RoomGroupId | 'all' | null>(null);
-  const [selectedRoom, setSelectedRoom] = useState<SelectedRoomState | null>(null);
-  const [nowMinutes, setNowMinutes] = useState<number>(() => getCurrentMadridMinutes());
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [nowMinutes, setNowMinutes] = useState<number>(() =>
+    getCurrentMadridMinutes()
+  );
 
   const abortRef = useRef<AbortController | null>(null);
 
-  const fetchDayTimetable = useCallback(
-    async (dateISO: string, forceRefresh = false, silent = false) => {
-      if (abortRef.current) {
-        abortRef.current.abort();
-      }
-      const controller = new AbortController();
-      abortRef.current = controller;
-
-      if (!silent) {
-        if (forceRefresh) {
-          setRefreshing(true);
-        } else {
-          setLoading(true);
-        }
-      }
-      setError(null);
-
-      try {
-        const params = new URLSearchParams({ date: dateISO });
-        if (forceRefresh) params.set('refresh', '1');
-        const res = await fetch(`/api/timetable?${params.toString()}`, {
-          signal: controller.signal,
-          cache: 'no-store',
-        });
-
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(
-            typeof data?.error === 'string'
-              ? data.error
-              : 'Error al cargar los horarios desde WebUntis.'
-          );
-        }
-
-        setTimetable(data as DayTimetableResponse);
-      } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') {
-          return;
-        }
-        setError(
-          err instanceof Error
-            ? err.message
-            : 'No se pudo obtener la información de WebUntis.'
-        );
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-          setRefreshing(false);
-        }
-      }
-    },
-    []
-  );
-
+  // Sync URL query param (?date=YYYY-MM-DD)
   useEffect(() => {
-    fetchDayTimetable(selectedDate, false, false);
-  }, [selectedDate, fetchDayTimetable]);
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('date', selectedDate);
+      window.history.replaceState({}, '', url.toString());
+    } catch {
+      // ignore history errors
+    }
+  }, [selectedDate]);
 
+  // Keep current time & midnight day rollover fresh
   useEffect(() => {
-    const clockTimer = window.setInterval(() => {
+    const timer = window.setInterval(() => {
       setNowMinutes(getCurrentMadridMinutes());
       const freshToday = getTodayMadridISO();
-      if (freshToday !== todayISO) {
-        setTodayISO(freshToday);
-        setSelectedDate((current) => (current === todayISO ? freshToday : current));
+      if (freshToday !== todayIso) {
+        setTodayIso(freshToday);
+        setSelectedDate((current) => (current === todayIso ? freshToday : current));
       }
     }, 60 * 1000);
-
-    const syncTimer = window.setInterval(() => {
-      fetchDayTimetable(selectedDate, true, true);
-    }, AUTO_REFRESH_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(clockTimer);
-      window.clearInterval(syncTimer);
-    };
-  }, [selectedDate, todayISO, fetchDayTimetable]);
-
-  useEffect(() => {
-    const handleAfterPrint = () => {
-      setPrintTarget(null);
-    };
-    window.addEventListener('afterprint', handleAfterPrint);
-    return () => window.removeEventListener('afterprint', handleAfterPrint);
-  }, []);
-
-  const triggerPrint = useCallback((target: RoomGroupId | 'all') => {
-    setPrintTarget(target);
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        window.print();
-      });
-    });
-  }, []);
-
-  const weekStrip = useMemo(() => getWeekStrip(selectedDate), [selectedDate]);
+    return () => window.clearInterval(timer);
+  }, [todayIso]);
 
   const currentSlotIndex = useMemo(() => {
-    if (selectedDate !== todayISO) return null;
-    if (nowMinutes < 8 * 60 || nowMinutes >= 21 * 60) return null;
-    return Math.floor((nowMinutes - 8 * 60) / 30);
-  }, [selectedDate, todayISO, nowMinutes]);
+    if (selectedDate !== todayIso) return null;
+    const found = TIME_SLOTS.find(
+      (s) => nowMinutes >= s.startMinutes && nowMinutes < s.endMinutes
+    );
+    return found ? found.index : null;
+  }, [selectedDate, todayIso, nowMinutes]);
 
-  // Extract all unique subjects active on the selected day across all grids
-  const availableSubjects: SubjectOption[] = useMemo(() => {
-    if (!timetable) return [];
-    const map = new Map<
-      string,
-      { altName: string; rooms: Set<string>; slotsCount: number }
-    >();
-
-    // Deduplicate rooms that appear in multiple grids (e.g. P6M7)
-    const seenRooms = new Set<string>();
-
-    for (const grid of timetable.grids) {
-      for (const room of grid.rooms) {
-        if (seenRooms.has(room.name)) continue;
-        seenRooms.add(room.name);
-
-        for (const period of room.periods) {
-          const subjectKey = period.subject.trim();
-          if (!subjectKey) continue;
-
-          let entry = map.get(subjectKey);
-          if (!entry) {
-            entry = {
-              altName: period.subjectAlt || '',
-              rooms: new Set<string>(),
-              slotsCount: 0,
-            };
-            map.set(subjectKey, entry);
-          }
-
-          entry.rooms.add(room.name);
-          const matchingSlots = TIME_SLOTS.filter(
-            (slot) => period.startTime < slot.endTime && period.endTime > slot.startTime
-          ).length;
-          entry.slotsCount += matchingSlots;
-        }
-      }
+  const fetchTimetable = useCallback(async (dateIso: string, force = false) => {
+    if (abortRef.current) {
+      abortRef.current.abort();
     }
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setIsLoading(true);
+    setErrorMsg(null);
 
-    return Array.from(map.entries())
-      .map(([name, data]) => ({
-        name,
-        altName: data.altName,
-        rooms: Array.from(data.rooms).sort((a, b) => a.localeCompare(b, 'es')),
-        slotsCount: data.slotsCount,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name, 'es'));
-  }, [timetable]);
-
-  // Daily summary metrics for the clean institutional overview strip
-  const dayStats = useMemo(() => {
-    if (!timetable) {
-      return {
-        totalUniqueRooms: 63,
-        activeRooms: 0,
-        freeAllDayRooms: 0,
-        avgOccupancy: 0,
+    try {
+      const qs = new URLSearchParams({ date: dateIso });
+      if (force) qs.set('refresh', '1');
+      const res = await fetch(`/api/timetable?${qs.toString()}`, {
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+      const data = (await res.json()) as DayTimetableResponse & {
+        error?: string;
       };
+      if (!res.ok) {
+        throw new Error(data.error || `Error HTTP ${res.status}`);
+      }
+      setTimetable(data);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo cargar el horario desde WebUntis.'
+      );
+    } finally {
+      if (abortRef.current === controller) {
+        setIsLoading(false);
+      }
     }
-    const seen = new Map<string, RoomDaySchedule>();
-    for (const grid of timetable.grids) {
-      for (const room of grid.rooms) {
-        if (!seen.has(room.name)) {
-          seen.set(room.name, room);
+  }, []);
+
+  useEffect(() => {
+    fetchTimetable(selectedDate, false);
+  }, [selectedDate, fetchTimetable]);
+
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const timer = window.setInterval(() => {
+      fetchTimetable(selectedDate, true);
+    }, AUTO_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [autoRefresh, selectedDate, fetchTimetable]);
+
+  // Keyboard navigation: Left/Right arrows move day by day
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'SELECT' ||
+          target.tagName === 'TEXTAREA')
+      ) {
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        setSelectedDate((d) => addDays(d, -1));
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        setSelectedDate((d) => addDays(d, 1));
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const triggerPrint = useCallback((target: 'ALL' | RoomGroupId) => {
+    document.body.setAttribute('data-print-target', target);
+    const cleanup = () => {
+      document.body.removeAttribute('data-print-target');
+      window.removeEventListener('afterprint', cleanup);
+    };
+    window.addEventListener('afterprint', cleanup);
+    window.setTimeout(() => {
+      window.print();
+    }, 60);
+  }, []);
+
+  const handlePrintAll = useCallback(() => {
+    if (activeGrid !== 'ALL') {
+      setActiveGrid('ALL');
+      window.setTimeout(() => triggerPrint('ALL'), 100);
+    } else {
+      triggerPrint('ALL');
+    }
+  }, [activeGrid, triggerPrint]);
+
+  const handlePrintGrid = useCallback(
+    (gridId: RoomGroupId) => {
+      triggerPrint(gridId);
+    },
+    [triggerPrint]
+  );
+
+  // Monday–Saturday week strip with live crimson occupancy bars
+  const weekDays = useMemo(() => {
+    const strip = getWeekStrip(selectedDate);
+    const summaryMap = new Map(
+      (timetable?.weekSummary ?? []).map((s) => [s.date, s])
+    );
+    const totalPossibleSlots = ALL_UNIQUE_ROOM_NAMES.length * TIME_SLOTS.length;
+
+    return strip.map((day) => {
+      const summary = summaryMap.get(day.iso);
+      const pct =
+        summary && totalPossibleSlots > 0
+          ? Math.min(
+              100,
+              Math.round((summary.occupiedSlots / totalPossibleSlots) * 100)
+            )
+          : 0;
+      return {
+        iso: day.iso,
+        shortDay: day.shortLabel,
+        dayNum: day.dayNumber,
+        activeRooms: summary?.activeRooms ?? null,
+        pct,
+      };
+    });
+  }, [selectedDate, timetable?.weekSummary]);
+
+  const normalizedSubject = useMemo(
+    () => normalizeSearchText(subjectQuery),
+    [subjectQuery]
+  );
+
+  // Unique scheduled subject names for the selected day (autocomplete datalist)
+  const availableSubjects = useMemo(() => {
+    if (!timetable) return [];
+    const set = new Set<string>();
+    for (const g of timetable.grids) {
+      for (const r of g.rooms) {
+        for (const p of r.periods) {
+          if (p.subject && p.subject.trim().length > 0) {
+            set.add(p.subject.trim());
+          }
         }
       }
     }
-    const rooms = Array.from(seen.values());
-    const activeRooms = rooms.filter((r) => r.occupiedSlotsCount > 0).length;
-    const totalOccSlots = rooms.reduce((sum, r) => sum + r.occupiedSlotsCount, 0);
-    const totalSlots = rooms.length * TIME_SLOTS.length;
-
-    return {
-      totalUniqueRooms: rooms.length,
-      activeRooms,
-      freeAllDayRooms: rooms.length - activeRooms,
-      avgOccupancy:
-        totalSlots > 0 ? Math.round((totalOccSlots / totalSlots) * 100) : 0,
-    };
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'es'));
   }, [timetable]);
 
-  const visibleGrids: GridDaySchedule[] = useMemo(() => {
+  const filteredGrids: GridDaySchedule[] = useMemo(() => {
     if (!timetable) return [];
-    const normalizedQuery = roomSearchQuery.trim().toLowerCase();
+    const normalizedRoomQuery = normalizeSearchText(roomQuery);
 
     return timetable.grids
-      .filter((grid) => activeSection === 'all' || grid.id === activeSection)
-      .map((grid) => {
-        const filteredRooms = grid.rooms.filter((room) => {
-          if (normalizedQuery) {
-            const matchesName = room.name.toLowerCase().includes(normalizedQuery);
-            const matchesLong = room.longName.toLowerCase().includes(normalizedQuery);
-            if (!matchesName && !matchesLong) {
-              return false;
-            }
+      .filter((g) => activeGrid === 'ALL' || g.id === activeGrid)
+      .map((g) => {
+        const rooms = g.rooms.filter((r) => {
+          if (
+            normalizedRoomQuery &&
+            !normalizeSearchText(r.name).includes(normalizedRoomQuery) &&
+            !normalizeSearchText(r.longName).includes(normalizedRoomQuery)
+          ) {
+            return false;
           }
-
-          if (selectedSubject && onlySubjectRooms) {
-            const hasSubject = room.periods.some(
-              (p) => p.subject === selectedSubject
+          if (freeAtSlot !== null && r.slots[freeAtSlot] !== 'free') {
+            return false;
+          }
+          if (normalizedSubject.length > 0) {
+            const hasMatchingSubject = r.periods.some(
+              (p) =>
+                normalizeSearchText(p.subject).includes(normalizedSubject) ||
+                normalizeSearchText(p.subjectAlt).includes(normalizedSubject) ||
+                p.groups.some((gr) =>
+                  normalizeSearchText(gr).includes(normalizedSubject)
+                )
             );
-            if (!hasSubject) return false;
+            if (!hasMatchingSubject) return false;
           }
-
-          if (filterMode === 'active') {
-            return room.occupiedSlotsCount > 0;
-          }
-
-          if (filterMode === 'free-at-slot') {
-            return room.slots[freeSlotIndex] === 'free';
-          }
-
           return true;
         });
 
-        const activeRoomsCount = filteredRooms.filter(
-          (r) => r.occupiedSlotsCount > 0
-        ).length;
-        const totalSlots = filteredRooms.length * TIME_SLOTS.length;
-        const occSlots = filteredRooms.reduce(
-          (sum, r) => sum + r.occupiedSlotsCount,
+        const occupiedSlots = rooms.reduce(
+          (acc, r) => acc + r.occupiedSlotsCount,
           0
         );
+        const activeRoomsCount = rooms.filter(
+          (r) => r.occupiedSlotsCount > 0
+        ).length;
+        const totalSlots = rooms.length * TIME_SLOTS.length;
 
         return {
-          ...grid,
-          rooms: filteredRooms,
+          ...g,
+          rooms,
           activeRoomsCount,
+          occupiedSlots,
+          totalSlots,
           occupancyPercent:
-            totalSlots > 0 ? Math.round((occSlots / totalSlots) * 100) : 0,
+            totalSlots > 0 ? Math.round((occupiedSlots / totalSlots) * 100) : 0,
         };
-      });
-  }, [
-    timetable,
-    activeSection,
-    roomSearchQuery,
-    selectedSubject,
-    onlySubjectRooms,
-    filterMode,
-    freeSlotIndex,
-  ]);
+      })
+      .filter((g) => g.rooms.length > 0);
+  }, [timetable, activeGrid, roomQuery, freeAtSlot, normalizedSubject]);
 
-  const selectedSubjectMeta = useMemo(
-    () => availableSubjects.find((s) => s.name === selectedSubject) ?? null,
-    [availableSubjects, selectedSubject]
+  const subjectMatchSummary = useMemo(() => {
+    if (normalizedSubject.length === 0) return null;
+    let matchingSlots = 0;
+    const matchedRoomNames = new Set<string>();
+
+    for (const g of filteredGrids) {
+      for (const r of g.rooms) {
+        if (matchedRoomNames.has(r.name)) continue;
+        let roomHits = 0;
+        for (const slot of TIME_SLOTS) {
+          if (r.slots[slot.index] === 'free') continue;
+          const hit = r.periods.some(
+            (p) =>
+              p.startTime < slot.endTime &&
+              p.endTime > slot.startTime &&
+              (normalizeSearchText(p.subject).includes(normalizedSubject) ||
+                normalizeSearchText(p.subjectAlt).includes(normalizedSubject) ||
+                p.groups.some((gr) =>
+                  normalizeSearchText(gr).includes(normalizedSubject)
+                ))
+          );
+          if (hit) roomHits += 1;
+        }
+        if (roomHits > 0) {
+          matchedRoomNames.add(r.name);
+          matchingSlots += roomHits;
+        }
+      }
+    }
+
+    return { matchingSlots, matchingRooms: matchedRoomNames.size };
+  }, [filteredGrids, normalizedSubject]);
+
+  const totals = useMemo(() => {
+    const seen = new Set<string>();
+    let occupiedSlots = 0;
+    let roomCount = 0;
+
+    for (const g of filteredGrids) {
+      for (const r of g.rooms) {
+        if (seen.has(r.name)) continue;
+        seen.add(r.name);
+        roomCount += 1;
+        occupiedSlots += r.occupiedSlotsCount;
+      }
+    }
+
+    const totalSlots = roomCount * TIME_SLOTS.length;
+    const pct = totalSlots > 0 ? Math.round((occupiedSlots / totalSlots) * 100) : 0;
+    return { roomCount, occupiedSlots, totalSlots, pct };
+  }, [filteredGrids]);
+
+  const fullDateLabel = useMemo(
+    () => formatFullSpanishDate(selectedDate),
+    [selectedDate]
   );
 
   const webUntisDirectUrl =
     timetable?.webUntisUrl ??
     `https://ehu.webuntis.com/WebUntis/?date=${encodeURIComponent(selectedDate)}#/basic/timetablePublic`;
 
-  const hasRoomFilters =
-    roomSearchQuery.trim().length > 0 || filterMode !== 'all';
-
   return (
-    <div className="min-h-screen bg-[#F5F7FA] text-slate-900 flex flex-col">
-      {/* Top Bar Contract: 1 row, 3 clean zones separated by gap-8 */}
-      <header className="no-print sticky top-0 z-30 bg-slate-950 text-white border-b border-slate-800">
-        <div className="max-w-[1440px] mx-auto px-4 sm:px-6 h-15 flex items-center justify-between gap-8">
+    <div className="min-h-screen flex flex-col bg-[#f3f5f8] text-slate-900">
+      {/* Strict 3-Zone Top Bar matching reference format */}
+      <header className="no-print sticky top-0 z-30 bg-white/95 backdrop-blur-sm border-b border-slate-200/90">
+        <div className="max-w-[1440px] mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-8">
+          {/* Zone 1: Single-line Brand Wordmark */}
           <a
-            href="#top"
+            href="/"
             onClick={(e) => {
               e.preventDefault();
-              setActiveSection('all');
+              setActiveGrid('ALL');
+              setRoomQuery('');
+              setSubjectQuery('');
+              setFreeAtSlot(null);
             }}
-            className="font-display text-base font-bold tracking-tight text-white whitespace-nowrap shrink-0"
+            className="font-display text-base font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
           >
-            EIB 306 · Horarios de Aulas
+            Ingeniería 306
           </a>
 
+          {/* Zone 2: Concise single-line section links */}
           <nav
-            aria-label="Cuadrículas del centro"
+            aria-label="Navegación por secciones"
             className="hidden md:flex items-center gap-6 text-sm font-medium"
           >
-            {(
-              [
-                { id: 'all', label: 'Todas las cuadrículas' },
-                { id: 'modulo-m', label: 'Módulo M' },
-                { id: 'modulo-i', label: 'Módulo I' },
-                { id: 'especiales', label: 'Salas Especiales' },
-              ] as const
-            ).map((item) => {
-              const isActive = activeSection === item.id;
+            {ROOM_GROUPS.map((g) => {
+              const active = activeGrid === g.id;
               return (
                 <button
-                  key={item.id}
+                  key={g.id}
                   type="button"
-                  onClick={() => setActiveSection(item.id)}
-                  className={[
-                    'py-1.5 border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer',
-                    isActive
-                      ? 'border-red-500 text-white'
-                      : 'border-transparent text-slate-300 hover:text-white hover:border-slate-600',
-                  ].join(' ')}
+                  onClick={() =>
+                    setActiveGrid((prev) => (prev === g.id ? 'ALL' : g.id))
+                  }
+                  className={`py-1 border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    active
+                      ? 'border-red-600 text-slate-950 font-semibold'
+                      : 'border-transparent text-slate-500 hover:text-slate-900'
+                  }`}
                 >
-                  {item.label}
+                  {g.isSpecial ? 'Especiales' : g.title}
                 </button>
               );
             })}
           </nav>
 
+          {/* Zone 3: Single Primary Action */}
           <div className="flex items-center shrink-0">
             <button
               type="button"
-              disabled={loading || !timetable}
-              onClick={() =>
-                triggerPrint(activeSection === 'all' ? 'all' : activeSection)
-              }
-              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
+              onClick={handlePrintAll}
+              disabled={!timetable || isLoading}
+              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
-              {activeSection === 'all' ? 'Imprimir todo' : 'Imprimir vista'}
+              <span>Imprimir todo</span>
             </button>
           </div>
         </div>
       </header>
 
-      {/* Main Workspace Container */}
-      <div
-        id="top"
-        className="max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-6 flex-1 flex flex-col lg:flex-row gap-6 items-start"
-      >
-        {/* Left Navigation, Calendar & Filters Sidebar */}
-        <aside className="no-print w-full lg:w-[288px] shrink-0 space-y-4 lg:sticky lg:top-20">
-          <MiniCalendar
-            selectedDate={selectedDate}
-            todayISO={todayISO}
-            onSelectDate={(iso) => setSelectedDate(iso)}
-          />
+      {/* Main Workspace */}
+      <div className="flex-1 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-6 flex flex-col lg:flex-row items-start gap-6">
+        {/* Mobile Calendar Toggle */}
+        <div className="no-print w-full lg:hidden flex items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={() => setMobileCalendarOpen((v) => !v)}
+            className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-200 rounded-lg cursor-pointer shrink-0"
+          >
+            <CalendarDays className="w-4 h-4 text-slate-500" />
+            <span>
+              {mobileCalendarOpen
+                ? 'Ocultar calendario'
+                : 'Calendario y filtros'}
+            </span>
+          </button>
 
-          {/* Dedicated Subject Search & Green Highlight Control */}
-          <SubjectSearch
-            subjects={availableSubjects}
-            selectedSubject={selectedSubject}
-            onlyMatchingRooms={onlySubjectRooms}
-            onSelectSubject={(name) => {
-              setSelectedSubject(name);
-              if (!name) setOnlySubjectRooms(false);
-            }}
-            onToggleOnlyMatchingRooms={setOnlySubjectRooms}
-          />
-
-          {/* Room Search & Availability Filter Panel */}
-          <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3.5">
-            <div>
-              <label
-                htmlFor="room-search-input"
-                className="block text-xs font-semibold text-slate-900 mb-1.5"
-              >
-                Filtrar por aula
-              </label>
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  id="room-search-input"
-                  type="text"
-                  value={roomSearchQuery}
-                  onChange={(e) => setRoomSearchQuery(e.target.value)}
-                  placeholder="Ej. P3M2A, P4I6A, Magna..."
-                  className="w-full pl-8 pr-8 py-2 text-xs bg-slate-50 border border-slate-200 rounded-md text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-2 focus:outline-red-600"
-                />
-                {roomSearchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => setRoomSearchQuery('')}
-                    aria-label="Limpiar búsqueda de aula"
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 p-0.5 cursor-pointer"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div>
-              <span className="block text-xs font-semibold text-slate-900 mb-1.5">
-                Disponibilidad
-              </span>
-              <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 rounded-md">
-                {(
-                  [
-                    { id: 'all', label: 'Todas' },
-                    { id: 'active', label: 'Ocupadas' },
-                    { id: 'free-at-slot', label: 'Libres' },
-                  ] as const
-                ).map((mode) => (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    onClick={() => setFilterMode(mode.id)}
-                    className={[
-                      'py-1.5 px-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap cursor-pointer',
-                      filterMode === mode.id
-                        ? 'bg-white text-slate-900 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900',
-                    ].join(' ')}
-                  >
-                    {mode.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {filterMode === 'free-at-slot' && (
-              <div>
-                <label
-                  htmlFor="free-slot-select"
-                  className="block text-xs text-slate-600 mb-1"
-                >
-                  Franja horaria libre
-                </label>
-                <select
-                  id="free-slot-select"
-                  value={freeSlotIndex}
-                  onChange={(e) => setFreeSlotIndex(Number(e.target.value))}
-                  className="w-full text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-md px-2.5 py-2 text-slate-900 focus:bg-white focus:outline-2 focus:outline-emerald-600"
-                >
-                  {TIME_SLOTS.map((slot) => (
-                    <option key={slot.index} value={slot.index}>
-                      {slot.label} –{' '}
-                      {String(Math.floor(slot.endTime / 100)).padStart(2, '0')}:
-                      {String(slot.endTime % 100).padStart(2, '0')}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            {hasRoomFilters && (
-              <button
-                type="button"
-                onClick={() => {
-                  setRoomSearchQuery('');
-                  setFilterMode('all');
-                }}
-                className="w-full py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 border border-slate-200 rounded-md hover:bg-slate-50 transition-colors cursor-pointer"
-              >
-                Restablecer filtros de aula
-              </button>
-            )}
-          </div>
-
-          {/* WebUntis Sync & Official Source Info */}
-          <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
-            <div>
-              <p className="text-xs font-semibold text-slate-900">
-                Escuela de Ingeniería de Bilbao
-              </p>
-              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
-                <span>Centro 306</span>
-                <span aria-hidden="true">·</span>
-                <span>UPV/EHU</span>
-                {timetable && (
-                  <>
-                    <span aria-hidden="true">·</span>
-                    <span className="font-mono tabular-nums">
-                      Act. {formatSyncTime(timetable.lastUpdated)}
-                    </span>
-                  </>
-                )}
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                disabled={refreshing || loading}
-                onClick={() => fetchDayTimetable(selectedDate, true, false)}
-                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-md hover:bg-slate-100 disabled:opacity-50 transition-colors whitespace-nowrap cursor-pointer"
-              >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`}
-                />
-                {refreshing ? 'Actualizando...' : 'Actualizar'}
-              </button>
-
-              <a
-                href={webUntisDirectUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap"
-              >
-                WebUntis
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            </div>
-          </div>
-        </aside>
-
-        {/* Main Grids Viewport */}
-        <main className="min-w-0 flex-1 w-full space-y-5">
-          {/* Mobile Section Tabs */}
-          <div className="no-print md:hidden flex items-center gap-1 p-1 bg-slate-200/70 rounded-lg overflow-x-auto">
+          <div className="flex items-center gap-1 overflow-x-auto">
             {(
               [
-                { id: 'all', label: 'Todas' },
+                { id: 'ALL', label: 'Todos' },
                 { id: 'modulo-m', label: 'Módulo M' },
                 { id: 'modulo-i', label: 'Módulo I' },
                 { id: 'especiales', label: 'Especiales' },
@@ -570,280 +456,446 @@ export default function App() {
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setActiveSection(item.id)}
-                className={[
-                  'px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap shrink-0 transition-colors cursor-pointer',
-                  activeSection === item.id
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600',
-                ].join(' ')}
+                onClick={() => setActiveGrid(item.id)}
+                className={`px-2.5 py-1.5 text-xs font-medium rounded-lg whitespace-nowrap shrink-0 cursor-pointer ${
+                  activeGrid === item.id
+                    ? 'bg-red-600 text-white'
+                    : 'bg-white border border-slate-200 text-slate-600'
+                }`}
               >
                 {item.label}
               </button>
             ))}
           </div>
+        </div>
 
-          {/* Institutional Date Control & Summary Header */}
-          <div className="no-print bg-white border border-slate-200 rounded-xl overflow-hidden">
-            <div className="px-5 py-4 flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-center gap-3 min-w-0">
+        {/* Intuitive Calendar & Filters Sidebar */}
+        <div
+          className={`no-print w-full lg:w-auto ${
+            mobileCalendarOpen ? 'block' : 'hidden lg:block'
+          }`}
+        >
+          <CalendarSidebar
+            selectedDate={selectedDate}
+            todayIso={todayIso}
+            onSelectDate={(iso) => {
+              setSelectedDate(iso);
+              setMobileCalendarOpen(false);
+            }}
+            roomQuery={roomQuery}
+            onRoomQueryChange={setRoomQuery}
+            freeAtSlot={freeAtSlot}
+            onFreeAtSlotChange={setFreeAtSlot}
+            currentSlotIndex={currentSlotIndex}
+            autoRefresh={autoRefresh}
+            onToggleAutoRefresh={() => setAutoRefresh((v) => !v)}
+            onManualRefresh={() => fetchTimetable(selectedDate, true)}
+            isLoading={isLoading}
+            fetchedAt={timetable?.lastUpdated ?? null}
+            lastImportTimestamp={timetable?.lastImportTimestamp ?? null}
+            webUntisDirectUrl={webUntisDirectUrl}
+          />
+        </div>
+
+        {/* Main Content Viewport */}
+        <main className="flex-1 min-w-0 w-full space-y-5">
+          {/* Architectural Deep-Slate Date Hero & Week Strip */}
+          <section className="no-print bg-slate-900 text-white rounded-2xl p-5 sm:p-6 shadow-[0_6px_24px_rgba(15,23,42,0.12)] space-y-5">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-xs text-slate-400 tracking-wide">
+                  {SCHOOL_INFO.university} · {SCHOOL_INFO.name} · Centro{' '}
+                  {SCHOOL_INFO.centerCode}
+                </p>
+                <h1 className="text-2xl sm:text-[28px] font-bold text-white tracking-tight mt-1 [text-wrap:balance]">
+                  {fullDateLabel}
+                </h1>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => fetchTimetable(selectedDate, true)}
+                  disabled={isLoading}
+                  title="Sincronizar ahora con ehu.webuntis.com"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <RefreshCw
+                    className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`}
+                  />
+                  <span>{isLoading ? 'Actualizando...' : 'Actualizar'}</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => setSelectedDate((d) => addDays(d, -1))}
                   aria-label="Día anterior"
-                  className="h-9 w-9 inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:border-slate-300 transition-colors shrink-0 cursor-pointer"
+                  title="Día anterior (Flecha izquierda)"
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-white/10 hover:bg-white/15 border border-white/10 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
                 >
                   <ChevronLeft className="w-4 h-4" />
-                </button>
-
-                <div className="min-w-0">
-                  <h1 className="text-lg sm:text-xl font-bold text-slate-900 tracking-tight truncate">
-                    {formatFullSpanishDate(selectedDate)}
-                  </h1>
-                  <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                    <span>Centro 306 · Escuela de Ingeniería de Bilbao</span>
-                    <span aria-hidden="true">·</span>
-                    <span className="font-mono tabular-nums">08:00 – 21:00</span>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setSelectedDate((d) => addDays(d, 1))}
-                  aria-label="Día siguiente"
-                  className="h-9 w-9 inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:border-slate-300 transition-colors shrink-0 cursor-pointer"
-                >
-                  <ChevronRight className="w-4 h-4" />
-                </button>
-              </div>
-
-              {/* Clean Color Legend */}
-              <div className="flex flex-wrap items-center gap-4 text-xs text-slate-700 shrink-0">
-                <span className="inline-flex items-center gap-1.5">
-                  <span className="w-3.5 h-3.5 bg-white border border-slate-300 inline-block" />
-                  Libre
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <span className="w-3.5 h-3.5 bg-red-600 border border-red-700 inline-block" />
-                  Ocupada
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <span className="w-3.5 h-3.5 bg-red-800 border border-red-900 inline-block" />
-                  Examen
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <span className="w-3.5 h-3.5 bg-emerald-600 border border-emerald-700 inline-block" />
-                  Asignatura
-                </span>
-              </div>
-            </div>
-
-            {/* Summary KPI Strip */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 border-t border-slate-200 divide-y sm:divide-y-0 sm:divide-x divide-slate-200 bg-slate-50/70">
-              <div className="px-5 py-3">
-                <p className="text-[11px] font-medium text-slate-500">
-                  Aulas monitorizadas
-                </p>
-                <p className="mt-0.5 text-lg font-bold font-mono tabular-nums text-slate-900">
-                  {dayStats.totalUniqueRooms}
-                </p>
-              </div>
-              <div className="px-5 py-3">
-                <p className="text-[11px] font-medium text-slate-500">
-                  Con actividad hoy
-                </p>
-                <p className="mt-0.5 text-lg font-bold font-mono tabular-nums text-red-700">
-                  {loading ? '—' : dayStats.activeRooms}
-                </p>
-              </div>
-              <div className="px-5 py-3">
-                <p className="text-[11px] font-medium text-slate-500">
-                  Libres toda la jornada
-                </p>
-                <p className="mt-0.5 text-lg font-bold font-mono tabular-nums text-slate-900">
-                  {loading ? '—' : dayStats.freeAllDayRooms}
-                </p>
-              </div>
-              <div className="px-5 py-3">
-                <p className="text-[11px] font-medium text-slate-500">
-                  Ocupación media diaria
-                </p>
-                <p className="mt-0.5 text-lg font-bold font-mono tabular-nums text-slate-900">
-                  {loading ? '—' : `${dayStats.avgOccupancy}%`}
-                </p>
-              </div>
-            </div>
-
-            {/* Instant 1-Click Weekday Strip */}
-            <div className="px-5 py-2.5 border-t border-slate-200 bg-white flex items-center justify-between gap-2 overflow-x-auto">
-              <div className="flex items-center gap-1.5">
-                {weekStrip.map((day) => {
-                  const isSelected = day.iso === selectedDate;
-                  const isToday = day.iso === todayISO;
-                  return (
-                    <button
-                      key={day.iso}
-                      type="button"
-                      onClick={() => setSelectedDate(day.iso)}
-                      className={[
-                        'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer',
-                        isSelected
-                          ? 'bg-slate-900 text-white'
-                          : isToday
-                            ? 'bg-red-50 text-red-700 hover:bg-red-100'
-                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200',
-                      ].join(' ')}
-                    >
-                      <span>{day.shortLabel}</span>
-                      <span className="font-mono tabular-nums">{day.dayNumber}</span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="flex items-center gap-1.5 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setSelectedDate((d) => addDays(d, -7))}
-                  className="px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-md transition-colors whitespace-nowrap cursor-pointer"
-                >
-                  −1 sem.
+                  <span className="hidden sm:inline">Anterior</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSelectedDate(todayISO)}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded-md transition-colors whitespace-nowrap cursor-pointer"
+                  onClick={() => setSelectedDate(todayIso)}
+                  className="px-3.5 py-1.5 text-xs font-medium text-slate-900 bg-white hover:bg-slate-100 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
                 >
-                  <Calendar className="w-3.5 h-3.5" />
                   Hoy
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSelectedDate((d) => addDays(d, 7))}
-                  className="px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-md transition-colors whitespace-nowrap cursor-pointer"
+                  onClick={() => setSelectedDate((d) => addDays(d, 1))}
+                  aria-label="Día siguiente"
+                  title="Día siguiente (Flecha derecha)"
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-200 bg-white/10 hover:bg-white/15 border border-white/10 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
                 >
-                  +1 sem.
+                  <span className="hidden sm:inline">Siguiente</span>
+                  <ChevronRight className="w-4 h-4" />
                 </button>
               </div>
             </div>
+
+            {/* Interactive Monday-Saturday Week Strip with Crimson Occupancy Bars */}
+            <div
+              role="tablist"
+              aria-label="Días de la semana"
+              className="grid grid-cols-3 sm:grid-cols-6 gap-2"
+            >
+              {weekDays.map((day) => {
+                const isSelected = day.iso === selectedDate;
+                const isToday = day.iso === todayIso;
+                return (
+                  <button
+                    key={day.iso}
+                    type="button"
+                    role="tab"
+                    aria-selected={isSelected}
+                    onClick={() => setSelectedDate(day.iso)}
+                    className={`px-3 py-2.5 rounded-xl text-left transition-all cursor-pointer border ${
+                      isSelected
+                        ? 'bg-white text-slate-900 border-white shadow-sm'
+                        : 'bg-white/[0.06] text-slate-200 border-white/10 hover:bg-white/[0.11]'
+                    }`}
+                  >
+                    <div className="flex items-baseline justify-between gap-1">
+                      <span className="text-xs font-semibold">
+                        {day.shortDay}{' '}
+                        <span className="font-mono tabular-nums">
+                          {day.dayNum}
+                        </span>
+                      </span>
+                      {isToday && (
+                        <span
+                          className={`text-[10px] font-semibold ${
+                            isSelected ? 'text-red-600' : 'text-red-400'
+                          }`}
+                        >
+                          Hoy
+                        </span>
+                      )}
+                    </div>
+                    <div
+                      className={`text-[11px] font-mono tabular-nums mt-0.5 truncate ${
+                        isSelected ? 'text-slate-500' : 'text-slate-400'
+                      }`}
+                    >
+                      {day.activeRooms !== null
+                        ? `${day.activeRooms} activos`
+                        : '—'}
+                    </div>
+                    <div
+                      className={`mt-2 h-1 w-full rounded-full overflow-hidden ${
+                        isSelected ? 'bg-slate-200' : 'bg-white/15'
+                      }`}
+                    >
+                      <div
+                        className="h-full bg-red-600 rounded-full transition-all duration-300"
+                        style={{ width: `${day.pct}%` }}
+                      />
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Quiet Unboxed Summary & Legend */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-white/10 text-xs text-slate-300">
+              <div className="flex flex-wrap items-center gap-2 tabular-nums">
+                <span className="font-semibold text-white">
+                  {totals.roomCount}{' '}
+                  {totals.roomCount === 1
+                    ? 'espacio visible'
+                    : 'espacios visibles'}
+                </span>
+                <span className="text-white/30" aria-hidden="true">
+                  ·
+                </span>
+                <span>{totals.occupiedSlots} franjas ocupadas</span>
+                <span className="text-white/30" aria-hidden="true">
+                  ·
+                </span>
+                <span>{totals.pct}% ocupación diaria</span>
+                {timetable && !errorMsg && (
+                  <>
+                    <span className="text-white/30" aria-hidden="true">
+                      ·
+                    </span>
+                    <span className="inline-flex items-center gap-1 text-emerald-300 font-mono">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      {timetable.syncedRooms}/{timetable.totalRooms} WebUntis{' '}
+                      {formatSyncTime(timetable.lastUpdated)}
+                    </span>
+                  </>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4">
+                {normalizedSubject.length > 0 && (
+                  <span className="inline-flex items-center gap-1.5 text-emerald-300 font-medium">
+                    <span className="inline-block w-3.5 h-3 rounded-[2px] bg-emerald-600 ring-1 ring-emerald-400/60" />
+                    Asignatura buscada
+                  </span>
+                )}
+                <span className="inline-flex items-center gap-1.5 text-slate-200">
+                  <span className="inline-block w-3.5 h-3 rounded-[2px] bg-red-600 ring-1 ring-red-400/50" />
+                  Ocupada
+                </span>
+                <span className="inline-flex items-center gap-1.5 text-slate-200">
+                  <span className="inline-block w-3.5 h-3 rounded-[2px] bg-white border border-slate-400" />
+                  Libre
+                </span>
+              </div>
+            </div>
+          </section>
+
+          {/* Dedicated Subject Search Bar (Highlights matching hours in green) */}
+          <section
+            aria-label="Buscador por nombre de asignatura"
+            className="no-print bg-white border border-slate-200/90 rounded-2xl shadow-[0_1px_3px_rgba(15,23,42,0.04)] px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3"
+          >
+            <div className="relative flex-1 min-w-0">
+              <BookOpen
+                className={`w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none transition-colors ${
+                  normalizedSubject.length > 0
+                    ? 'text-emerald-600'
+                    : 'text-slate-400'
+                }`}
+              />
+              <input
+                type="text"
+                list="asignaturas-del-dia"
+                value={subjectQuery}
+                onChange={(e) => setSubjectQuery(e.target.value)}
+                placeholder="Buscar por nombre de asignatura o actividad (ej. Cálculo, Física, Álgebra...)"
+                aria-label="Buscar por nombre de asignatura"
+                className={`w-full pl-9 pr-9 py-2 text-sm text-slate-900 placeholder:text-slate-400 rounded-xl border transition-colors focus:outline-none focus:ring-2 ${
+                  normalizedSubject.length > 0
+                    ? 'bg-emerald-50/40 border-emerald-300 focus:ring-emerald-600 focus:border-transparent'
+                    : 'bg-slate-50 border-slate-200 focus:bg-white focus:ring-emerald-600 focus:border-transparent'
+                }`}
+              />
+              <datalist id="asignaturas-del-dia">
+                {availableSubjects.map((subj) => (
+                  <option key={subj} value={subj} />
+                ))}
+              </datalist>
+              {subjectQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSubjectQuery('')}
+                  aria-label="Quitar búsqueda de asignatura"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 rounded-md cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+
+            {subjectMatchSummary ? (
+              <div className="flex items-center justify-between sm:justify-end gap-3 text-xs shrink-0 tabular-nums">
+                <span className="text-emerald-800 font-medium">
+                  {subjectMatchSummary.matchingSlots}{' '}
+                  {subjectMatchSummary.matchingSlots === 1
+                    ? 'franja en verde'
+                    : 'franjas en verde'}{' '}
+                  · {subjectMatchSummary.matchingRooms}{' '}
+                  {subjectMatchSummary.matchingRooms === 1 ? 'aula' : 'aulas'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSubjectQuery('')}
+                  className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  Quitar filtro
+                </button>
+              </div>
+            ) : (
+              <span className="text-xs text-slate-400 shrink-0 hidden md:inline">
+                Las horas coincidentes se marcan en verde
+              </span>
+            )}
+          </section>
+
+          {/* Clean Workspace Section Switcher */}
+          <div className="no-print flex items-center gap-1.5 p-1 bg-white border border-slate-200/90 rounded-xl overflow-x-auto">
+            <button
+              type="button"
+              onClick={() => setActiveGrid('ALL')}
+              className={`px-3.5 py-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                activeGrid === 'ALL'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              Todos ({ALL_UNIQUE_ROOM_NAMES.length})
+            </button>
+            {ROOM_GROUPS.map((g) => {
+              const active = activeGrid === g.id;
+              return (
+                <button
+                  key={g.id}
+                  type="button"
+                  onClick={() => setActiveGrid(g.id)}
+                  className={`px-3.5 py-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    active
+                      ? 'bg-red-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                  }`}
+                >
+                  {g.title}{' '}
+                  <span
+                    className={`font-mono tabular-nums ${
+                      active ? 'text-red-100' : 'text-slate-400'
+                    }`}
+                  >
+                    ({g.rooms.length})
+                  </span>
+                </button>
+              );
+            })}
           </div>
 
-          {/* Active Subject Highlight Bar */}
-          {selectedSubject && (
-            <div className="no-print bg-emerald-50 border border-emerald-200 rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2 text-xs text-emerald-800">
-                  <span className="w-3 h-3 bg-emerald-600 inline-block shrink-0" />
-                  <span className="font-semibold text-emerald-950">
-                    {selectedSubject}
-                  </span>
-                  {selectedSubjectMeta ? (
-                    <>
-                      <span aria-hidden="true">·</span>
-                      <span className="font-mono tabular-nums">
-                        {selectedSubjectMeta.rooms.length}{' '}
-                        {selectedSubjectMeta.rooms.length === 1 ? 'aula' : 'aulas'}
-                      </span>
-                      <span aria-hidden="true">·</span>
-                      <span>{selectedSubjectMeta.rooms.join(', ')}</span>
-                    </>
-                  ) : (
-                    <>
-                      <span aria-hidden="true">·</span>
-                      <span>Sin horario registrado en esta fecha</span>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setSelectedSubject(null);
-                  setOnlySubjectRooms(false);
-                }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-900 bg-white border border-emerald-300 hover:bg-emerald-100 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <X className="w-3.5 h-3.5" />
-                Quitar selección
-              </button>
-            </div>
-          )}
-
-          {/* Error Banner */}
-          {error && (
+          {/* Error State */}
+          {errorMsg && (
             <div
               role="alert"
-              className="no-print bg-white border border-red-200 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4"
+              className="no-print bg-white border border-red-200 rounded-2xl p-5 flex flex-wrap items-center justify-between gap-4"
             >
-              <div>
-                <p className="text-sm font-semibold text-red-700">
-                  Error de sincronización con WebUntis
-                </p>
-                <p className="mt-0.5 text-xs text-slate-600">{error}</p>
+              <div className="flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    Error de sincronización con WebUntis
+                  </h2>
+                  <p className="text-xs text-slate-600 mt-0.5">{errorMsg}</p>
+                </div>
               </div>
               <button
                 type="button"
-                onClick={() => fetchDayTimetable(selectedDate, true, false)}
-                className="px-4 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+                onClick={() => fetchTimetable(selectedDate, true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg cursor-pointer whitespace-nowrap"
               >
-                Reintentar
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Reintentar</span>
               </button>
             </div>
           )}
 
-          {/* Occupancy Grids or Loading Skeletons */}
-          {loading ? (
-            <div className="space-y-5">
-              {ROOM_GROUPS.filter(
-                (g) => activeSection === 'all' || g.id === activeSection
-              ).map((g) => (
-                <OccupancyGridSkeleton
+          {/* Loading Skeleton */}
+          {isLoading && !timetable && (
+            <div className="no-print space-y-5" aria-busy="true">
+              {ROOM_GROUPS.map((g) => (
+                <div
                   key={g.id}
-                  title={g.title}
-                  subtitle={g.subtitle}
-                  rowCount={g.rooms.length}
+                  className="bg-white border border-slate-200 rounded-2xl overflow-hidden"
+                >
+                  <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+                    <div className="space-y-1.5">
+                      <div className="h-4 w-48 bg-slate-200 rounded animate-pulse" />
+                      <div className="h-2 w-32 bg-slate-100 rounded animate-pulse" />
+                    </div>
+                    <div className="h-8 w-36 bg-slate-100 rounded-lg animate-pulse" />
+                  </div>
+                  <div className="p-4 space-y-2">
+                    {Array.from({ length: Math.min(g.rooms.length, 6) }).map(
+                      (_, idx) => (
+                        <div
+                          key={idx}
+                          className="h-6 w-full bg-slate-100 rounded animate-pulse"
+                        />
+                      )
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Populated Grids */}
+          {timetable && filteredGrids.length > 0 && (
+            <div
+              className={`space-y-6 transition-opacity duration-150 ${
+                isLoading ? 'opacity-65' : 'opacity-100'
+              }`}
+            >
+              {filteredGrids.map((grid) => (
+                <TimetableGrid
+                  key={grid.id}
+                  grid={grid}
+                  dateIso={timetable.date}
+                  currentSlotIndex={currentSlotIndex}
+                  highlightedSlotIndex={freeAtSlot}
+                  subjectQuery={subjectQuery}
+                  onSelectSubject={setSubjectQuery}
+                  onPrintGrid={handlePrintGrid}
                 />
               ))}
             </div>
-          ) : (
-            <div className="space-y-5">
-              {visibleGrids.map((grid) => (
-                <OccupancyGrid
-                  key={grid.id}
-                  grid={grid}
-                  dateISO={timetable?.date ?? selectedDate}
-                  highlightedSlotIndex={
-                    filterMode === 'free-at-slot' ? freeSlotIndex : null
-                  }
-                  currentSlotIndex={currentSlotIndex}
-                  selectedSubject={selectedSubject}
-                  printTarget={printTarget}
-                  onPrintGrid={triggerPrint}
-                  onSelectRoom={(room, gridTitle, slotIndex) =>
-                    setSelectedRoom({ room, gridTitle, slotIndex })
-                  }
-                />
-              ))}
+          )}
+
+          {/* Empty Filter State */}
+          {timetable && !isLoading && filteredGrids.length === 0 && (
+            <div className="no-print bg-white border border-slate-200 rounded-2xl p-10 text-center space-y-3">
+              <p className="text-sm font-semibold text-slate-900">
+                No hay espacios que coincidan con los filtros activos
+              </p>
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                Prueba con otro código de aula, cambia la franja horaria o
+                selecciona todos los apartados para ver los{' '}
+                {ALL_UNIQUE_ROOM_NAMES.length} espacios del centro.
+              </p>
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveGrid('ALL');
+                    setRoomQuery('');
+                    setSubjectQuery('');
+                    setFreeAtSlot(null);
+                  }}
+                  className="px-4 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+                >
+                  Restablecer filtros
+                </button>
+              </div>
             </div>
           )}
         </main>
       </div>
 
-      {/* Room Detail Modal */}
-      <RoomDetailModal
-        room={selectedRoom?.room ?? null}
-        gridTitle={selectedRoom?.gridTitle ?? ''}
-        dateISO={timetable?.date ?? selectedDate}
-        webUntisUrl={webUntisDirectUrl}
-        selectedSubject={selectedSubject}
-        initialSlotIndex={selectedRoom?.slotIndex}
-        onSelectSubject={(name) => {
-          setSelectedSubject(name);
-          if (!name) setOnlySubjectRooms(false);
-        }}
-        onClose={() => setSelectedRoom(null)}
-      />
+      {/* Quiet Institutional Footer */}
+      <footer className="no-print border-t border-slate-200/90 bg-white mt-8">
+        <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+          <span>
+            {SCHOOL_INFO.university} · {SCHOOL_INFO.name} (Centro{' '}
+            {SCHOOL_INFO.centerCode})
+          </span>
+          <span>
+            Sincronización en vivo con ehu.webuntis.com · Impresión en A4
+            horizontal
+          </span>
+        </div>
+      </footer>
     </div>
   );
 }

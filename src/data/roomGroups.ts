@@ -1,30 +1,38 @@
 export interface TimeSlot {
   index: number;
   startTime: number; // e.g. 800, 830, ..., 2030
-  endTime: number;   // e.g. 830, 900, ..., 2100
-  hour: string;      // "08" .. "20"
-  minute: string;    // "00" | "30"
-  label: string;     // "08:00" .. "20:30"
+  endTime: number; // e.g. 830, 900, ..., 2100
+  startMinutes: number; // 480 .. 1230
+  endMinutes: number; // 510 .. 1260
+  hour: string; // "08" .. "20"
+  minute: string; // "00" | "30"
+  label: string; // "08:00" .. "20:30"
+  endLabel: string; // "08:30" .. "21:00"
 }
 
 export const TIME_SLOTS: TimeSlot[] = Array.from({ length: 26 }, (_, index) => {
-  const totalStartMinutes = 8 * 60 + index * 30;
-  const totalEndMinutes = totalStartMinutes + 30;
-  const startH = Math.floor(totalStartMinutes / 60);
-  const startM = totalStartMinutes % 60;
-  const endH = Math.floor(totalEndMinutes / 60);
-  const endM = totalEndMinutes % 60;
+  const startMinutes = 8 * 60 + index * 30;
+  const endMinutes = startMinutes + 30;
+  const startH = Math.floor(startMinutes / 60);
+  const startM = startMinutes % 60;
+  const endH = Math.floor(endMinutes / 60);
+  const endM = endMinutes % 60;
 
   const hour = String(startH).padStart(2, '0');
   const minute = String(startM).padStart(2, '0');
+  const endHour = String(endH).padStart(2, '0');
+  const endMin = String(endM).padStart(2, '0');
 
   return {
     index,
     startTime: startH * 100 + startM,
     endTime: endH * 100 + endM,
+    startMinutes,
+    endMinutes,
     hour,
     minute,
     label: `${hour}:${minute}`,
+    endLabel: `${endHour}:${endMin}`,
   };
 });
 
@@ -35,13 +43,22 @@ export interface RoomGroupDef {
   shortLabel: string;
   title: string;
   subtitle: string;
+  isSpecial?: boolean;
   rooms: string[];
 }
 
-export const CENTER_CODE = '306';
-export const CENTER_NAME = 'Escuela de Ingeniería de Bilbao';
-export const DEPARTMENT_ID = 238; // Bilboko Ingeniaritza Eskola / Escuela Ingenieria de Bilbao
-export const DEFAULT_FORMAT_ID = 5; // 306-Euiti Bilbao
+export const SCHOOL_INFO = {
+  university: 'UPV/EHU',
+  name: 'Escuela de Ingeniería de Bilbao',
+  centerCode: '306',
+  departmentId: 238, // Bilboko Ingeniaritza Eskola / Escuela Ingenieria de Bilbao
+  defaultFormatId: 5, // 306-Euiti Bilbao
+} as const;
+
+export const CENTER_CODE = SCHOOL_INFO.centerCode;
+export const CENTER_NAME = SCHOOL_INFO.name;
+export const DEPARTMENT_ID = SCHOOL_INFO.departmentId;
+export const DEFAULT_FORMAT_ID = SCHOOL_INFO.defaultFormatId;
 
 export const ROOM_GROUPS: RoomGroupDef[] = [
   {
@@ -49,6 +66,7 @@ export const ROOM_GROUPS: RoomGroupDef[] = [
     shortLabel: 'Módulo M',
     title: 'Edificio II · Módulo M',
     subtitle: 'Aulas y seminarios B63 · Plantas P2 a P6',
+    isSpecial: false,
     rooms: [
       'P2M1A_B63',
       'P2M2A_B63',
@@ -76,6 +94,7 @@ export const ROOM_GROUPS: RoomGroupDef[] = [
     shortLabel: 'Módulo I',
     title: 'Edificio II · Módulo I',
     subtitle: 'Aulas, seminarios y laboratorios B63 · Plantas P2 a P8',
+    isSpecial: false,
     rooms: [
       'P2I23S_B63',
       'P2I25S_B63',
@@ -114,9 +133,10 @@ export const ROOM_GROUPS: RoomGroupDef[] = [
   },
   {
     id: 'especiales',
-    shortLabel: 'Salas Especiales',
+    shortLabel: 'Especiales',
     title: 'Salas Especiales y Actos',
     subtitle: 'Aulas Magnas, Salones de Actos, Grados y Juntas',
+    isSpecial: true,
     rooms: [
       'P0E1 S.CONFER Edif I',
       'P0I1 A.MAGNA Edif II',
@@ -172,9 +192,18 @@ export interface GridDaySchedule {
   shortLabel: string;
   title: string;
   subtitle: string;
+  isSpecial: boolean;
   rooms: RoomDaySchedule[];
   activeRoomsCount: number;
+  occupiedSlots: number;
+  totalSlots: number;
   occupancyPercent: number;
+}
+
+export interface WeekDaySummary {
+  date: string; // YYYY-MM-DD
+  activeRooms: number;
+  occupiedSlots: number;
 }
 
 export interface DayTimetableResponse {
@@ -184,6 +213,10 @@ export interface DayTimetableResponse {
   centerName: string;
   webUntisUrl: string;
   lastUpdated: string; // ISO timestamp
+  lastImportTimestamp: number | null;
+  syncedRooms: number;
+  totalRooms: number;
   cached: boolean;
+  weekSummary: WeekDaySummary[];
   grids: GridDaySchedule[];
 }

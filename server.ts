@@ -16,6 +16,7 @@ import type {
   PeriodDetail,
   RoomDaySchedule,
   SlotState,
+  WeekDaySummary,
 } from './src/data/roomGroups.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -47,6 +48,7 @@ interface RoomDirectoryEntry {
 interface DirectoryState {
   roomsByName: Map<string, RoomDirectoryEntry>;
   formatId: number;
+  lastImportTimestamp: number | null;
   fetchedAt: number;
 }
 
@@ -88,6 +90,7 @@ interface RawWebUntisPeriod {
 interface WeekCacheEntry {
   weekKey: string;
   fetchedAt: number;
+  syncedRooms: number;
   // dateYYYYMMDD -> roomName -> PeriodDetail[]
   byDateAndRoom: Map<string, Map<string, PeriodDetail[]>>;
 }
@@ -119,6 +122,16 @@ function getMondayKey(isoDate: string): string {
   const dow = dt.getUTCDay();
   const offset = dow === 0 ? -6 : 1 - dow;
   dt.setUTCDate(dt.getUTCDate() + offset);
+  const ry = dt.getUTCFullYear();
+  const rm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const rd = String(dt.getUTCDate()).padStart(2, '0');
+  return `${ry}-${rm}-${rd}`;
+}
+
+function addDaysISO(isoDate: string, delta: number): string {
+  const [y, m, d] = isoDate.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  dt.setUTCDate(dt.getUTCDate() + delta);
   const ry = dt.getUTCFullYear();
   const rm = String(dt.getUTCMonth() + 1).padStart(2, '0');
   const rd = String(dt.getUTCDate()).padStart(2, '0');
@@ -247,6 +260,7 @@ async function getRoomDirectory(forceRefresh = false): Promise<DirectoryState> {
         data?: {
           elements?: RawWebUntisElement[];
           formats?: Array<{ id: number; name?: string }>;
+          lastImportTimestamp?: number;
         };
       }>('/api/public/timetable/weekly/pageconfig?type=4');
 
@@ -282,6 +296,10 @@ async function getRoomDirectory(forceRefresh = false): Promise<DirectoryState> {
       const state: DirectoryState = {
         roomsByName,
         formatId,
+        lastImportTimestamp:
+          typeof payload.data?.lastImportTimestamp === 'number'
+            ? payload.data.lastImportTimestamp
+            : null,
         fetchedAt: Date.now(),
       };
       directoryCache = state;
@@ -350,7 +368,6 @@ function parseRoomWeeklyPeriods(
       cellState === 'FREE' ||
       Boolean(period.is?.cancelled);
 
-    // Check if the room itself was removed/cancelled from this period
     const roomRef = (period.elements ?? []).find(
       (el) => el.type === 4 && el.id === roomId
     );
@@ -458,6 +475,7 @@ async function fetchWeekData(
     );
 
     const byDateAndRoom = new Map<string, Map<string, PeriodDetail[]>>();
+    let syncedRooms = 0;
 
     await mapWithConcurrency(
       roomsToFetch,
@@ -475,6 +493,7 @@ async function fetchWeekData(
           };
         }>(query);
 
+        syncedRooms += 1;
         const roomByDate = parseRoomWeeklyPeriods(entry.id, raw);
         for (const [dateKey, periods] of roomByDate) {
           let dateMap = byDateAndRoom.get(dateKey);
@@ -490,10 +509,10 @@ async function fetchWeekData(
     const cacheEntry: WeekCacheEntry = {
       weekKey,
       fetchedAt: Date.now(),
+      syncedRooms,
       byDateAndRoom,
     };
 
-    // Bounded LRU eviction
     if (weekCache.size >= MAX_CACHED_WEEKS && !weekCache.has(weekKey)) {
       let oldestKey: string | null = null;
       let oldestTime = Infinity;
@@ -525,6 +544,45 @@ async function fetchWeekData(
   } finally {
     weekInFlight.delete(weekKey);
   }
+}
+
+function buildWeekSummary(weekEntry: WeekCacheEntry): WeekDaySummary[] {
+  return Array.from({ length: 6 }, (_, dayIndex) => {
+    const dayIso = addDaysISO(weekEntry.weekKey, dayIndex);
+    const compact = dayIso.replaceAll('-', '');
+    const roomMap = weekEntry.byDateAndRoom.get(compact);
+
+    let activeRooms = 0;
+    let occupiedSlots = 0;
+
+    if (roomMap) {
+      for (const roomName of ALL_UNIQUE_ROOM_NAMES) {
+        const periods = roomMap.get(roomName) ?? [];
+        if (periods.length === 0) continue;
+
+        let roomOcc = 0;
+        for (const slot of TIME_SLOTS) {
+          if (
+            periods.some(
+              (p) => p.startTime < slot.endTime && p.endTime > slot.startTime
+            )
+          ) {
+            roomOcc += 1;
+          }
+        }
+        if (roomOcc > 0) {
+          activeRooms += 1;
+          occupiedSlots += roomOcc;
+        }
+      }
+    }
+
+    return {
+      date: dayIso,
+      activeRooms,
+      occupiedSlots,
+    };
+  });
 }
 
 function buildDayResponse(
@@ -574,19 +632,20 @@ function buildDayResponse(
       };
     });
 
-    const totalCapacitySlots = rooms.length * TIME_SLOTS.length;
+    const totalSlots = rooms.length * TIME_SLOTS.length;
     const occupancyPercent =
-      totalCapacitySlots > 0
-        ? Math.round((totalOccupiedSlots / totalCapacitySlots) * 100)
-        : 0;
+      totalSlots > 0 ? Math.round((totalOccupiedSlots / totalSlots) * 100) : 0;
 
     return {
       id: group.id,
       shortLabel: group.shortLabel,
       title: group.title,
       subtitle: group.subtitle,
+      isSpecial: Boolean(group.isSpecial),
       rooms,
       activeRoomsCount,
+      occupiedSlots: totalOccupiedSlots,
+      totalSlots,
       occupancyPercent,
     };
   });
@@ -598,7 +657,11 @@ function buildDayResponse(
     centerName: CENTER_NAME,
     webUntisUrl: `${WEBUNTIS_BASE}/?date=${encodeURIComponent(isoDate)}#/basic/timetablePublic`,
     lastUpdated: new Date(weekEntry.fetchedAt).toISOString(),
+    lastImportTimestamp: directory.lastImportTimestamp,
+    syncedRooms: weekEntry.syncedRooms,
+    totalRooms: ALL_UNIQUE_ROOM_NAMES.length,
     cached,
+    weekSummary: buildWeekSummary(weekEntry),
     grids,
   };
 }
@@ -613,7 +676,7 @@ async function startServer(): Promise<void> {
 
   app.get('/api/timetable', async (req, res) => {
     const rawDate = typeof req.query.date === 'string' ? req.query.date.trim() : '';
-    const forceRefresh = req.query.refresh === '1';
+    const forceRefresh = req.query.refresh === '1' || req.query.force === '1';
 
     if (!isValidISODate(rawDate)) {
       res.status(400).json({

@@ -27,6 +27,14 @@ const MONTHS_CAPITALIZED_ES = MONTHS_ES.map(
   (m) => m.charAt(0).toUpperCase() + m.slice(1)
 );
 
+export function normalizeSearchText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
 export function getTodayMadridISO(): string {
   try {
     const parts = new Intl.DateTimeFormat('en-CA', {
@@ -40,8 +48,7 @@ export function getTodayMadridISO(): string {
     const d = parts.find((p) => p.type === 'day')?.value ?? '01';
     return `${y}-${m}-${d}`;
   } catch {
-    const now = new Date();
-    return toISODate(now);
+    return toISODate(new Date());
   }
 }
 
@@ -88,9 +95,16 @@ export function getMondayOfWeek(iso: string): string {
   return toISODate(d);
 }
 
+export function getNextMondayISO(fromIso: string): string {
+  const d = parseISODate(fromIso);
+  const dow = d.getUTCDay(); // 0=Sun..6=Sat
+  const daysUntilNextMonday = dow === 0 ? 1 : 8 - dow;
+  d.setUTCDate(d.getUTCDate() + daysUntilNextMonday);
+  return toISODate(d);
+}
+
 /**
- * Matches the exact WebUntis header format shown in Screenshot 4:
- * e.g. "Lu, 23.11. 2026"
+ * Matches the exact WebUntis header format: e.g. "Lu, 23.11. 2026"
  */
 export function formatWebUntisDayHeader(iso: string): string {
   const d = parseISODate(iso);
@@ -108,17 +122,6 @@ export function formatFullSpanishDate(iso: string): string {
   const month = MONTHS_ES[d.getUTCMonth()];
   const year = d.getUTCFullYear();
   return `${weekday}, ${day} de ${month} de ${year}`;
-}
-
-export function formatShortSpanishDate(iso: string): string {
-  const d = parseISODate(iso);
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
-  return `${day}/${month}/${d.getUTCFullYear()}`;
-}
-
-export function getMonthLabel(year: number, monthIndex: number): string {
-  return `${MONTHS_CAPITALIZED_ES[monthIndex]} ${year}`;
 }
 
 export function getAllMonthsES(): string[] {
@@ -173,7 +176,8 @@ export function getMonthCalendarCells(year: number, monthIndex: number): Calenda
   return cells;
 }
 
-export function formatSyncTime(isoTimestamp: string): string {
+export function formatSyncTime(isoTimestamp: string | null): string {
+  if (!isoTimestamp) return '—';
   try {
     return new Intl.DateTimeFormat('es-ES', {
       timeZone: 'Europe/Madrid',
@@ -181,6 +185,21 @@ export function formatSyncTime(isoTimestamp: string): string {
       minute: '2-digit',
     }).format(new Date(isoTimestamp));
   } catch {
-    return '';
+    return '—';
+  }
+}
+
+export function formatWebUntisImportTimestamp(ms: number | null): string | null {
+  if (!ms) return null;
+  try {
+    return new Intl.DateTimeFormat('es-ES', {
+      timeZone: 'Europe/Madrid',
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(ms));
+  } catch {
+    return null;
   }
 }

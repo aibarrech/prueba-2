@@ -10,6 +10,7 @@
   html {
     font-family: var(--font-sans);
     scroll-behavior: smooth;
+    background-color: #f3f5f8;
   }
 
   h1, h2, h3, h4 {
@@ -21,7 +22,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Precision Landscape A4 Print Styles for Occupancy Grids */
+/* Precision Landscape A4 Print Styles matching reference layout */
 @media print {
   @page {
     size: A4 landscape;
@@ -46,57 +47,72 @@
     display: block !important;
   }
 
-  .print-grid-section {
+  .printable-grid {
     border: none !important;
+    border-radius: 0 !important;
     box-shadow: none !important;
     background: #ffffff !important;
     padding: 0 !important;
     margin: 0 !important;
+    overflow: visible !important;
     break-inside: avoid;
     page-break-inside: avoid;
   }
 
-  .print-grid-section.print-page-break {
+  /* When printing ALL grids, put each cuadrícula cleanly on its own page */
+  body[data-print-target="ALL"] .printable-grid {
     break-after: page;
     page-break-after: always;
   }
 
-  .print-grid-section:last-child {
+  body[data-print-target="ALL"] .printable-grid:last-of-type {
     break-after: auto;
     page-break-after: auto;
   }
 
-  .print-hidden-target {
+  /* When printing a single cuadrícula, hide the others */
+  body[data-print-target="modulo-m"] .printable-grid:not([data-grid-id="modulo-m"]),
+  body[data-print-target="modulo-i"] .printable-grid:not([data-grid-id="modulo-i"]),
+  body[data-print-target="especiales"] .printable-grid:not([data-grid-id="especiales"]) {
     display: none !important;
   }
 
-  .occupancy-cell-occupied {
+  .timetable-scroll-wrap {
+    overflow: visible !important;
+  }
+
+  .timetable-table {
+    width: 100% !important;
+    min-width: 0 !important;
+    table-layout: fixed !important;
+    font-size: 8.5px !important;
+  }
+
+  .timetable-room-col {
+    position: static !important;
+    width: 138px !important;
+    padding: 2px 6px !important;
+    font-size: 9px !important;
+  }
+
+  .timetable-table th,
+  .timetable-table td {
+    height: 18px !important;
+  }
+
+  .timetable-slot-occupied {
     background-color: #dc2626 !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
   }
 
-  .occupancy-cell-exam {
-    background-color: #991b1b !important;
-    -webkit-print-color-adjust: exact !important;
-    print-color-adjust: exact !important;
-  }
-
-  .occupancy-cell-subject {
+  .timetable-slot-subject-match {
     background-color: #16a34a !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
   }
 
-  .occupancy-table {
-    width: 100% !important;
-    table-layout: fixed !important;
-    font-size: 9px !important;
-  }
-
-  .occupancy-table th,
-  .occupancy-table td {
-    padding-top: 2px !important;
-    padding-bottom: 2px !important;
+  .timetable-slot-free {
+    background-color: #ffffff !important;
   }
 }
