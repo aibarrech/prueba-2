@@ -160,17 +160,29 @@ export const ALL_UNIQUE_ROOM_NAMES: string[] = Array.from(
 
 export type SlotState = 'free' | 'occupied' | 'exam';
 
+export interface TeacherInfo {
+  id: number;
+  code: string;
+  fullName: string;
+}
+
 export interface PeriodDetail {
   id: number;
   startTime: number;
   endTime: number;
   startLabel: string;
   endLabel: string;
+  blockStartLabel: string;
+  blockEndLabel: string;
   cellState: string;
   subject: string;
   subjectAlt: string;
+  group: string;
   groups: string[];
-  teachers: string[];
+  teacher: string;
+  teachers: TeacherInfo[];
+  reservedBy: string;
+  lessonType: string;
   lessonText: string;
   periodText: string;
   substText: string;
@@ -219,4 +231,22 @@ export interface DayTimetableResponse {
   cached: boolean;
   weekSummary: WeekDaySummary[];
   grids: GridDaySchedule[];
+}
+
+export interface TeacherDaySession {
+  id: number;
+  startTime: number;
+  endTime: number;
+  startLabel: string;
+  endLabel: string;
+  subject: string;
+  group: string;
+  rooms: string[];
+  lessonType: string;
+}
+
+export interface TeacherScheduleResponse {
+  date: string;
+  teacher: TeacherInfo;
+  sessions: TeacherDaySession[];
 }
